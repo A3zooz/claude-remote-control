@@ -1,12 +1,15 @@
 {
   "name": "claude-remote-control",
-  "owner": { "name": "A3zooz" },
+  "owner": {
+    "name": "A3zooz"
+  },
   "plugins": [
     {
       "name": "remote-control",
       "source": "./",
       "description": "Set up, check, change or remove Claude Remote Control on a Mac, so Claude Code sessions can be started from the Claude app.",
-      "category": "productivity"
+      "category": "productivity",
+      "version": "1.1.0"
     }
   ]
 }

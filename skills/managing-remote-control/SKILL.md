@@ -27,7 +27,7 @@ Ask only about what changes. Keep the current values for everything else.
 |---|---|
 | `--folder` | where sessions start (default `~`) |
 | `--permission` | `default` (asks every time), `acceptEdits`, `auto`, `bypassPermissions` |
-| `--awake` | `yes` / `no`. Only works on the charger; check `pmset -g batt` |
+| `--awake` | `no`, `charger` (awake only while plugged in), `always` (also on battery, which drains it faster). `pmset -g batt` shows which it's on now |
 
 Full access (`bypassPermissions`) gets its own question first: anyone signed in to their Claude account could run any command on this Mac with no approval. Add `--yes-full-access` only after an explicit yes to that question.
 

@@ -44,8 +44,16 @@ Where Claude starts working. The default is your home folder. Pick your projects
 | **3. Auto** | Claude decides, and only asks for risky actions. |
 | **4. Full access, never asks** | Claude can run *anything* on your Mac without asking. Anyone signed in to your Claude account could use it. You have to type `FULL` to choose this. |
 
-**3. Keep your Mac awake while plugged in?**
-A sleeping Mac can't be reached from your phone. Say yes if you want it reachable whenever it's on the charger. Closing a laptop lid still puts it to sleep.
+**3. Keep your Mac awake?**
+A sleeping Mac can't be reached from your phone.
+
+| Choice | What it means |
+|---|---|
+| **1. No** *(default)* | Your Mac sleeps as usual. |
+| **2. On the charger** | Stays awake while plugged in. |
+| **3. Always, charger and battery** | Also stays awake on battery, which drains it faster. |
+
+Closing a laptop lid still puts it to sleep, whichever you pick.
 
 ## Check, change or remove it
 
@@ -102,12 +110,12 @@ Setup without questions (for scripts or device management):
 
 ```
 curl -fsSL https://raw.githubusercontent.com/A3zooz/claude-remote-control/main/install.sh \
-  | bash -s -- install --folder ~/code --permission acceptEdits --awake no
+  | bash -s -- install --folder ~/code --permission acceptEdits --awake charger
 ```
 
 - `--permission` takes `default`, `acceptEdits`, `auto` or `bypassPermissions`. `bypassPermissions` also requires `--yes-full-access`.
 - The service uses the absolute path to `claude` and the `PATH` from the Terminal you installed from. If you move Claude Code or add tools to your PATH later, run the line again and pick *Change settings*.
-- "Keep awake" wraps the command in `caffeinate -s`.
+- `--awake` takes `no`, `charger` or `always` (`yes` still works and means `charger`). `charger` wraps the command in `caffeinate -s`, which only holds while on AC power. `always` uses `caffeinate -is`; `-i` also blocks idle sleep on battery.
 - `--detach` (with `install`, `restart` or `uninstall`) runs the change as a one-off launchd job, 10 seconds later, and returns right away. Use it when the command runs inside a Remote Control session: stopping the service ends that session, but not the launchd job. If a detached `install` fails, it puts the previous settings back. `status` shows the result. It needs the script saved to a file (`curl -fsSL … -o install.sh && bash install.sh install … --detach`).
 - With no keyboard (run by a script or by Claude), anything not passed as an option keeps its saved value, or the default on a first install.
 - The service runs with `ProcessType=Interactive`, the launchd workaround suggested in #80827. The watchdog's `SIGCONT` covers the cases where that isn't enough.

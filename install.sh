@@ -8,7 +8,7 @@
 #     ... | bash -s -- status
 #     ... | bash -s -- restart
 #     ... | bash -s -- uninstall
-#     ... | bash -s -- install --folder ~/code --permission acceptEdits --awake yes   (no questions)
+#     ... | bash -s -- install --folder ~/code --permission acceptEdits --awake charger   (no questions)
 #
 # What it does: adds a small background service (a macOS LaunchAgent) that runs
 # `claude remote-control` whenever you're logged in to your Mac. No sudo, nothing
@@ -135,6 +135,25 @@ permission_label() {
   esac
 }
 
+# Keep-awake modes: no | charger (caffeinate -s, AC power only) | always
+# (caffeinate -is: -i also blocks idle sleep on battery). Old configs say yes = charger.
+normalize_awake() {
+  case "$1" in
+    no|n|false|0|none|off) printf 'no' ;;
+    yes|y|true|1|charger|ac|plugged) printf 'charger' ;;
+    always|battery|both|charger+battery) printf 'always' ;;
+    *) return 1 ;;
+  esac
+}
+
+awake_label() {
+  case "$1" in
+    charger) say "on the charger" ;;
+    always)  say "always (charger and battery)" ;;
+    *)       say "no" ;;
+  esac
+}
+
 valid_permission() {
   case "$1" in default|acceptEdits|auto|bypassPermissions|plan|dontAsk) return 0 ;; *) return 1 ;; esac
 }
@@ -208,7 +227,7 @@ check_folder_free() {
   ours="$(svc_pid)"
   for p in $(pgrep -f '(^|/)claude remote-control' 2>/dev/null); do
     [ "$p" = "$ours" ] && continue
-    [ -n "$ours" ] && [ "$(ps -o ppid= -p "$p" | tr -d ' ')" = "$ours" ] && continue  # ours under caffeinate
+    [ -n "$ours" ] && [ "$(ps -o ppid= -p "$p" | tr -d ' ')" = "$ours" ] && continue  # our keep-awake caffeinate helper (its args contain the command)
     cwd="$(lsof -a -p "$p" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
     [ "$cwd" = "$FOLDER" ] || continue
     err "Another Remote Control server is already running in $(pretty "$FOLDER") (process $p)."
@@ -266,13 +285,23 @@ choose_permission() {
 }
 
 choose_awake() {
-  local def="n"
-  [ "${AWAKE:-no}" = "yes" ] && def="y"
+  local def=1 a
+  case "$(normalize_awake "${AWAKE:-no}" || echo no)" in charger) def=2 ;; always) def=3 ;; esac
   say ""
-  say "${B}3. Keep this Mac awake while it's plugged in?${N}"
-  say "   ${D}A sleeping Mac can't be reached from the app. This only works on the charger;${N}"
-  say "   ${D}closing a laptop lid still puts it to sleep.${N}"
-  if yes_no "   Keep awake?" "$def"; then AWAKE=yes; else AWAKE=no; fi
+  say "${B}3. Keep this Mac awake so the app can reach it?${N}"
+  say "   ${D}A sleeping Mac can't be reached. Closing a laptop lid still puts it to sleep.${N}"
+  say "   1) No                                 ${D}normal sleep${N}"
+  say "   2) On the charger                     ${D}stays awake while plugged in${N}"
+  say "   3) Always, charger and battery        ${D}also on battery, which drains it faster${N}"
+  while :; do
+    a="$(ask "   Choose 1-3:" "$def")"
+    case "$a" in
+      1) AWAKE=no; break ;;
+      2) AWAKE=charger; break ;;
+      3) AWAKE=always; break ;;
+      *) err "Please type 1, 2 or 3." ; [ "$HAVE_TTY" = 1 ] || die "Invalid choice." ;;
+    esac
+  done
 }
 
 # ---------- service ----------
@@ -284,10 +313,12 @@ write_plist() {
   path_env="${claude_dir}:${PATH:-/usr/bin:/bin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
   prog=""
-  if [ "$AWAKE" = "yes" ]; then
-    prog="${prog}    <string>/usr/bin/caffeinate</string><string>-s</string>
-"
-  fi
+  case "$AWAKE" in
+    charger) prog="${prog}    <string>/usr/bin/caffeinate</string><string>-s</string>
+" ;;
+    always) prog="${prog}    <string>/usr/bin/caffeinate</string><string>-is</string>
+" ;;
+  esac
   prog="${prog}    <string>$(xml_escape "$CLAUDE")</string>
     <string>remote-control</string>
     <string>--permission-mode</string><string>${PERMISSION}</string>"
@@ -377,7 +408,9 @@ resolve() { # follow symlinks to the real file
 
 pid="$(launchctl print "${DOMAIN}/${RC_LABEL}" 2>/dev/null | awk '/^\tpid = /{print $3; exit}')"
 [ -n "$pid" ] || exit 0
-# With "keep awake" the service is caffeinate and the server is its child.
+# caffeinate given a command forks: launchd's pid becomes the server and a
+# caffeinate child holds the sleep assertions. Older versions may differ, so
+# if the service pid is caffeinate itself, use its child.
 if [ "$(ps -o comm= -p "$pid")" = "/usr/bin/caffeinate" ]; then
   pid="$(pgrep -P "$pid" | head -1)"
   [ -n "$pid" ] || exit 0
@@ -496,6 +529,9 @@ validate_args() { # reject bad options before touching anything
   if [ -n "$ARG_FOLDER" ] && [ ! -d "$(expand_path "$ARG_FOLDER")" ]; then
     die "Folder doesn't exist: $(expand_path "$ARG_FOLDER")"
   fi
+  if [ -n "$ARG_AWAKE" ] && ! normalize_awake "$ARG_AWAKE" >/dev/null; then
+    die "Unknown keep-awake setting: $ARG_AWAKE (use no, charger or always)"
+  fi
   if [ -n "$ARG_PERMISSION" ]; then
     valid_permission "$ARG_PERMISSION" || die "Unknown permission level: $ARG_PERMISSION (use default, acceptEdits, auto or bypassPermissions)"
     if [ "$ARG_PERMISSION" = "bypassPermissions" ] && [ "$ARG_YES_FULL" != 1 ]; then
@@ -516,16 +552,14 @@ cmd_install() {
   load_config
   [ -n "$ARG_FOLDER" ] && FOLDER="$(expand_path "$ARG_FOLDER")"
   [ -n "$ARG_PERMISSION" ] && PERMISSION="$ARG_PERMISSION"
-  [ -n "$ARG_AWAKE" ] && AWAKE="$ARG_AWAKE"
+  [ -n "$ARG_AWAKE" ] && AWAKE="$(normalize_awake "$ARG_AWAKE")"
+  AWAKE="$(normalize_awake "${AWAKE:-no}" || echo no)"
 
   [ -n "$ARG_FOLDER" ] || choose_folder
   # With no keyboard, keep the saved level (already confirmed once) instead of asking.
   if [ -z "$ARG_PERMISSION" ] && { [ "$HAVE_TTY" = 1 ] || [ -z "$PERMISSION" ]; }; then choose_permission; fi
-  if [ -n "$ARG_AWAKE" ]; then
-    case "$AWAKE" in y|yes|true|1) AWAKE=yes ;; *) AWAKE=no ;; esac
-  else
-    choose_awake
-  fi
+  # With no keyboard, keep the saved setting instead of asking.
+  if [ -z "$ARG_AWAKE" ] && { [ "$HAVE_TTY" = 1 ] || [ ! -f "$CONF" ]; }; then choose_awake; fi
 
   check_folder_free
 
@@ -557,7 +591,7 @@ print_done() {
   say ""
   say "  Starts in:     $(pretty "$FOLDER")"
   say "  Permissions:   $(permission_label "$PERMISSION")"
-  say "  Stay awake:    ${AWAKE}"
+  say "  Stay awake:    $(awake_label "$AWAKE")"
   say ""
   say "  ${D}It starts by itself whenever you log in to this Mac. To change settings,${N}"
   say "  ${D}check on it or remove it, run the same command again.${N}"
@@ -574,7 +608,7 @@ cmd_status() {
   if [ -n "$url" ]; then ok "Connected: $url"; elif [ -n "$pid" ]; then warn "Running but hasn't connected to Claude yet"; rc=1; fi
   say "  Starts in:     $(pretty "$FOLDER")"
   say "  Permissions:   $(permission_label "${PERMISSION:-default}")"
-  say "  Stay awake:    ${AWAKE:-no}"
+  say "  Stay awake:    $(awake_label "$(normalize_awake "${AWAKE:-no}" || echo no)")"
   if launchctl print "${DOMAIN}/${WD_LABEL}" >/dev/null 2>&1; then
     say "  Watchdog:      on ${D}(un-freezes stuck sessions, restarts after Claude updates)${N}"
   else
@@ -699,7 +733,7 @@ usage() {
   say "  ${ONE_LINER} -s -- uninstall"
   say ""
   say "Options for install: --folder PATH  --permission default|acceptEdits|auto|bypassPermissions"
-  say "                     --awake yes|no  --yes-full-access"
+  say "                     --awake no|charger|always  --yes-full-access"
   say "Any change: --detach  run it as a one-off launchd job (survives this session ending)"
 }
 
