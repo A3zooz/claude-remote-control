@@ -69,8 +69,19 @@ Everything stays inside your user account. No admin password needed.
 | File | Purpose |
 |---|---|
 | `~/Library/LaunchAgents/io.github.a3zooz.claude-remote-control.plist` | The background service. It runs `claude remote-control`. |
+| `~/Library/LaunchAgents/io.github.a3zooz.claude-remote-control.watchdog.plist` | A small check that runs once a minute (see below) |
 | `~/.config/claude-remote-control/config` | Your three answers |
+| `~/.config/claude-remote-control/watchdog.sh` | What that check does |
 | `~/Library/Logs/claude-remote-control/` | Logs, for troubleshooting |
+
+## The watchdog
+
+A small check runs once a minute and fixes two known problems with running Remote Control in the background:
+
+- **Sessions stuck on "Running…" while you're away.** macOS can freeze the session while nobody is using the Mac, and it stays stuck until someone touches the mouse ([anthropics/claude-code#80827](https://github.com/anthropics/claude-code/issues/80827)). The watchdog wakes frozen sessions back up.
+- **New sessions failing after Claude Code updates itself.** The background service keeps using the old version, and once that version is cleaned up every new session fails, while the service still looks fine ([anthropics/claude-code#84817](https://github.com/anthropics/claude-code/issues/84817)). The watchdog restarts the service on the new version when no session is running, or right away if the old version is already gone.
+
+Anything it does is logged in `~/Library/Logs/claude-remote-control/watchdog.log`, and **Check it's working** shows the latest entries.
 
 ## For technical folks
 
@@ -84,3 +95,5 @@ curl -fsSL https://raw.githubusercontent.com/A3zooz/claude-remote-control/main/i
 - `--permission` takes `default`, `acceptEdits`, `auto` or `bypassPermissions`. `bypassPermissions` also requires `--yes-full-access`.
 - The service uses the absolute path to `claude` and the `PATH` from the Terminal you installed from. If you move Claude Code or add tools to your PATH later, run the line again and pick *Change settings*.
 - "Keep awake" wraps the command in `caffeinate -s`.
+- The service runs with `ProcessType=Interactive`, the launchd workaround suggested in #80827. The watchdog's `SIGCONT` covers the cases where that isn't enough.
+- Not applied: `SHELL=/bin/sh` from [#78903](https://github.com/anthropics/claude-code/issues/78903). It would change the shell Claude's Bash tool uses. Only consider it if sessions hang before the first reply and you have a heavy `~/.zshrc`.

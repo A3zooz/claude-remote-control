@@ -26,6 +26,9 @@ PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 LOG_DIR="${HOME}/Library/Logs/claude-remote-control"
 CONF_DIR="${HOME}/.config/claude-remote-control"
 CONF="${CONF_DIR}/config"
+WD_LABEL="${LABEL}.watchdog"
+WD_PLIST="${HOME}/Library/LaunchAgents/${WD_LABEL}.plist"
+WD_SCRIPT="${CONF_DIR}/watchdog.sh"
 REPO_URL="https://github.com/A3zooz/claude-remote-control"
 ONE_LINER="curl -fsSL https://raw.githubusercontent.com/A3zooz/claude-remote-control/main/install.sh | bash"
 
@@ -185,7 +188,7 @@ warn_other_servers() {
   local f
   for f in "$HOME"/Library/LaunchAgents/*.plist; do
     [ -f "$f" ] || continue
-    [ "$f" = "$PLIST" ] && continue
+    case "$(basename "$f")" in "${LABEL}".*) continue ;; esac  # ours, incl. the watchdog
     if grep -q "remote-control" "$f" 2>/dev/null && grep -q "claude" "$f" 2>/dev/null; then
       warn "Another Remote Control service is already set up: $(basename "$f")"
       warn "Both will work, but this Mac will show up twice in the Claude app."
@@ -300,7 +303,100 @@ EOF
   printf 'FOLDER=%s\nPERMISSION=%s\nAWAKE=%s\n' "$FOLDER" "$PERMISSION" "$AWAKE" >"$CONF"
 }
 
+# The watchdog runs once a minute and fixes two known Remote Control problems
+# that a plain launchd service can't:
+#  1. macOS can freeze session processes while nobody is using the Mac; they
+#     stay stuck on "Running..." until someone touches the mouse. A SIGCONT
+#     un-freezes them. https://github.com/anthropics/claude-code/issues/80827
+#  2. After Claude Code auto-updates, the running server keeps spawning
+#     sessions from the old version's file. Once that file is cleaned up,
+#     every new session fails while the server still looks fine. The
+#     watchdog restarts the server onto the new version when no session is
+#     running (or right away if the old file is already gone).
+#     https://github.com/anthropics/claude-code/issues/84817
+write_watchdog() {
+  mkdir -p "$CONF_DIR"
+  cat >"$WD_SCRIPT" <<'WATCHDOG'
+#!/bin/bash
+# Claude Remote Control watchdog (https://github.com/A3zooz/claude-remote-control).
+# Started every minute by launchd. Env: RC_LABEL, RC_CLAUDE, RC_LOG, RC_DRY_RUN.
+set -u
+DOMAIN="gui/$(id -u)"
+log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$RC_LOG"; }
+act() { if [ -n "${RC_DRY_RUN:-}" ]; then log "(dry run) would: $*"; else "$@"; fi; }
+
+resolve() { # follow symlinks to the real file
+  local p="$1" l n=0
+  while [ -L "$p" ] && [ $n -lt 10 ]; do
+    l="$(readlink "$p")"
+    case "$l" in /*) p="$l" ;; *) p="$(dirname "$p")/$l" ;; esac
+    n=$((n + 1))
+  done
+  printf '%s/%s' "$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)" "$(basename "$p")"
+}
+
+pid="$(launchctl print "${DOMAIN}/${RC_LABEL}" 2>/dev/null | awk '/^\tpid = /{print $3; exit}')"
+[ -n "$pid" ] || exit 0
+# With "keep awake" the service is caffeinate and the server is its child.
+if [ "$(ps -o comm= -p "$pid")" = "/usr/bin/caffeinate" ]; then
+  pid="$(pgrep -P "$pid" | head -1)"
+  [ -n "$pid" ] || exit 0
+fi
+workers="$(pgrep -P "$pid" -f -- '--sdk-url' || true)"
+
+# 1. Un-freeze session processes macOS suspended.
+for w in $workers; do
+  case "$(ps -o stat= -p "$w" 2>/dev/null)" in
+    *T*) act kill -CONT "$w" && log "resumed a frozen session (process $w)" ;;
+  esac
+done
+
+# 2. Move the server onto a new Claude Code version.
+running="$(lsof -a -p "$pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+[ -n "$running" ] || exit 0
+current="$(resolve "$RC_CLAUDE")"
+[ "$(resolve "$running")" = "$current" ] && exit 0
+if [ ! -e "$running" ]; then
+  log "server's Claude Code version was removed by an update; restarting on $(basename "$current")"
+  act launchctl kickstart -k "${DOMAIN}/${RC_LABEL}"
+elif [ -z "$workers" ]; then
+  log "Claude Code updated ($(basename "$running") -> $(basename "$current")), no sessions running; restarting"
+  act launchctl kickstart -k "${DOMAIN}/${RC_LABEL}"
+fi
+WATCHDOG
+  chmod 755 "$WD_SCRIPT"
+
+  cat >"$WD_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Created by ${REPO_URL} . Remove with: ${ONE_LINER} -s -- uninstall -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${WD_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string><string>$(xml_escape "$WD_SCRIPT")</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RC_LABEL</key><string>${LABEL}</string>
+    <key>RC_CLAUDE</key><string>$(xml_escape "$CLAUDE")</string>
+    <key>RC_LOG</key><string>$(xml_escape "$LOG_DIR")/watchdog.log</string>
+    <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StartInterval</key><integer>60</integer>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardInPath</key><string>/dev/null</string>
+  <key>StandardOutPath</key><string>$(xml_escape "$LOG_DIR")/watchdog.log</string>
+  <key>StandardErrorPath</key><string>$(xml_escape "$LOG_DIR")/watchdog.log</string>
+</dict>
+</plist>
+EOF
+  plutil -lint "$WD_PLIST" >/dev/null || die "Couldn't write a valid watchdog file ($WD_PLIST)."
+}
+
 stop_service() {
+  launchctl bootout "${DOMAIN}/${WD_LABEL}" >/dev/null 2>&1 || true
   launchctl bootout "${DOMAIN}/${LABEL}" >/dev/null 2>&1 || true
   local i=0
   while is_loaded && [ $i -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
@@ -311,6 +407,10 @@ start_service() {
   launchctl enable "${DOMAIN}/${LABEL}" >/dev/null 2>&1 || true
   launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null || launchctl kickstart -k "${DOMAIN}/${LABEL}" >/dev/null 2>&1 \
     || die "macOS refused to start the service. Details: launchctl print ${DOMAIN}/${LABEL}"
+  if [ -f "$WD_PLIST" ]; then
+    launchctl enable "${DOMAIN}/${WD_LABEL}" >/dev/null 2>&1 || true
+    launchctl bootstrap "$DOMAIN" "$WD_PLIST" >/dev/null 2>&1 || warn "The watchdog didn't start; Remote Control still works without it."
+  fi
 }
 
 wait_ready() { # up to ~45s for the server to register with claude.ai
@@ -373,6 +473,7 @@ cmd_install() {
   step "Setting it up"
   stop_service
   write_plist
+  write_watchdog
   ok "Background service saved"
   start_service
   ok "Started"
@@ -415,7 +516,17 @@ cmd_status() {
   say "  Starts in:     $(pretty "$FOLDER")"
   say "  Permissions:   $(permission_label "${PERMISSION:-default}")"
   say "  Stay awake:    ${AWAKE:-no}"
+  if launchctl print "${DOMAIN}/${WD_LABEL}" >/dev/null 2>&1; then
+    say "  Watchdog:      on ${D}(un-freezes stuck sessions, restarts after Claude updates)${N}"
+  else
+    say "  Watchdog:      ${Y}off${N} ${D}(run again and choose Change settings to add it)${N}"
+  fi
   say "  Logs:          $(pretty "$LOG_DIR")"
+  if [ -s "${LOG_DIR}/watchdog.log" ]; then
+    say ""
+    say "  ${D}Recent watchdog actions:${N}"
+    tail -3 "${LOG_DIR}/watchdog.log" | sed 's/^/    /'
+  fi
   if [ -s "${LOG_DIR}/err.log" ]; then
     say ""
     say "  ${D}Recent errors:${N}"
@@ -436,7 +547,7 @@ cmd_restart() {
 cmd_uninstall() {
   step "Removing Claude Remote Control"
   stop_service
-  rm -f "$PLIST"; ok "Background service removed"
+  rm -f "$PLIST" "$WD_PLIST"; ok "Background service removed"
   rm -rf "$CONF_DIR" "$LOG_DIR"; ok "Settings and logs removed"
   say ""
   say "  Claude Code itself is still installed. This Mac will drop out of the Claude app"
