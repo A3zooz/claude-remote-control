@@ -12,5 +12,6 @@
     "macos",
     "launchd",
     "mobile"
-  ]
+  ],
+  "license": "MIT"
 }

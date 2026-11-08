@@ -112,3 +112,7 @@ curl -fsSL https://raw.githubusercontent.com/A3zooz/claude-remote-control/main/i
 - With no keyboard (run by a script or by Claude), anything not passed as an option keeps its saved value, or the default on a first install.
 - The service runs with `ProcessType=Interactive`, the launchd workaround suggested in #80827. The watchdog's `SIGCONT` covers the cases where that isn't enough.
 - Not applied: `SHELL=/bin/sh` from [#78903](https://github.com/anthropics/claude-code/issues/78903). It would change the shell Claude's Bash tool uses. Only consider it if sessions hang before the first reply and you have a heavy `~/.zshrc`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
