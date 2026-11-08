@@ -191,8 +191,25 @@ warn_other_servers() {
     case "$(basename "$f")" in "${LABEL}".*) continue ;; esac  # ours, incl. the watchdog
     if grep -q "remote-control" "$f" 2>/dev/null && grep -q "claude" "$f" 2>/dev/null; then
       warn "Another Remote Control service is already set up: $(basename "$f")"
-      warn "Both will work, but this Mac will show up twice in the Claude app."
+      warn "Two services can't share a folder, and this Mac would show up twice in the Claude app."
     fi
+  done
+}
+
+# Remote Control refuses to start in a folder another server already serves
+# ("This folder is already served by ..."), so catch that before changing anything.
+check_folder_free() {
+  local ours p cwd
+  ours="$(svc_pid)"
+  for p in $(pgrep -f '(^|/)claude remote-control' 2>/dev/null); do
+    [ "$p" = "$ours" ] && continue
+    [ -n "$ours" ] && [ "$(ps -o ppid= -p "$p" | tr -d ' ')" = "$ours" ] && continue  # ours under caffeinate
+    cwd="$(lsof -a -p "$p" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+    [ "$cwd" = "$FOLDER" ] || continue
+    err "Another Remote Control server is already running in $(pretty "$FOLDER") (process $p)."
+    say "  Only one can serve a folder. Stop that one first (quit it, or remove the"
+    say "  service that starts it), or pick a different folder, then run this again."
+    exit 1
   done
 }
 
@@ -455,6 +472,13 @@ show_failure() {
     say "  ${D}Last lines of ${LOG_DIR}/err.log:${N}"
     tail -8 "${LOG_DIR}/err.log" | sed 's/^/    /'
   fi
+  if grep -q "already served" "${LOG_DIR}/err.log" 2>/dev/null; then
+    say ""
+    say "  Another Remote Control server is using $(pretty "$FOLDER"). Stop it, or run this"
+    say "  again and pick a different folder."
+    stop_service  # otherwise launchd retries it every 30 seconds
+    return
+  fi
   say ""
   say "  Common fixes:"
   say "   • Open Terminal, run ${B}cd \"$(pretty "$FOLDER")\" && claude${N} once, accept any prompt, then run this again."
@@ -493,6 +517,8 @@ cmd_install() {
   else
     choose_awake
   fi
+
+  check_folder_free
 
   step "Setting it up"
   stop_service
