@@ -67,9 +67,63 @@ ask() {
 }
 
 yes_no() { # yes_no "Question" y|n -> exit 0 for yes
-  local a
-  a="$(ask "$1 (y/n)" "$2")"
-  case "$a" in [Yy]*) return 0 ;; *) return 1 ;; esac
+  local def=2
+  case "$2" in [Yy]*) def=1 ;; esac
+  say "$1" >/dev/tty 2>/dev/null || say "$1"
+  pick "$def" "Yes" "No"
+  [ "$PICKED" = 1 ]
+}
+
+# pick DEFAULT "Label<TAB>hint" ... -> PICKED = chosen number (1-based).
+# Up/down arrows (or j/k, or the option's number) move, Enter chooses. With no
+# keyboard it takes the default. Draws on /dev/tty, so it works under curl | bash.
+pick() {
+  local def="$1"; shift
+  local n=$# sel="$1" i key rest line label hint
+  sel="$def"
+  if [ "$HAVE_TTY" != 1 ]; then PICKED="$def"; return 0; fi
+  local opts=("$@")
+  _pick_draw() {
+    for ((i = 1; i <= n; i++)); do
+      line="${opts[i-1]}"; label="${line%%$'\t'*}"; hint=""
+      [ "$line" != "$label" ] && hint="${line#*$'\t'}"
+      if [ "$i" = "$sel" ]; then
+        printf '\033[2K   %s❯ %d) %-34s%s %s%s%s\n' "$G$B" "$i" "$label" "$N" "$D" "$hint" "$N"
+      else
+        printf '\033[2K     %d) %-34s %s%s%s\n' "$i" "$label" "$D" "$hint" "$N"
+      fi
+    done >/dev/tty
+  }
+  printf '   %s↑/↓ to move, Enter to choose%s\n' "$D" "$N" >/dev/tty
+  printf '\033[?25l' >/dev/tty                      # hide the cursor while picking
+  trap 'printf "\033[?25h" >/dev/tty; exit 130' INT TERM
+  _pick_draw
+  while :; do
+    IFS= read -rsn1 key </dev/tty || break
+    case "$key" in
+      $'\033')
+        IFS= read -rsn2 -t 1 rest </dev/tty || rest=""
+        case "$rest" in
+          '[A'|'OA') [ "$sel" -gt 1 ] && sel=$((sel - 1)) ;;
+          '[B'|'OB') [ "$sel" -lt "$n" ] && sel=$((sel + 1)) ;;
+        esac ;;
+      k) [ "$sel" -gt 1 ] && sel=$((sel - 1)) ;;
+      j) [ "$sel" -lt "$n" ] && sel=$((sel + 1)) ;;
+      [1-9]) [ "$key" -le "$n" ] && sel="$key" ;;
+      '') break ;;
+    esac
+    printf '\033[%dA' "$n" >/dev/tty                 # back to the first option, redraw
+    _pick_draw
+  done
+  # Collapse the list (and its hint line) into one line showing the choice.
+  printf '\033[%dA' "$((n + 1))" >/dev/tty
+  for ((i = 0; i <= n; i++)); do printf '\033[2K\n' >/dev/tty; done
+  printf '\033[%dA' "$((n + 1))" >/dev/tty
+  line="${opts[sel-1]}"
+  printf '   %s✓%s %s\n' "$G" "$N" "${line%%$'\t'*}" >/dev/tty
+  printf '\033[?25h' >/dev/tty
+  trap - INT TERM
+  PICKED="$sel"
 }
 
 # ---------- helpers ----------
@@ -239,14 +293,16 @@ check_folder_free() {
 
 # ---------- questions ----------
 choose_folder() {
-  local def="${FOLDER:-$HOME}" a
+  local def="${FOLDER:-$HOME}" a hint="your home folder"
+  [ "$def" != "$HOME" ] && hint="the current setting"
   say ""
   say "${B}1. Which folder should new sessions start in?${N}"
   say "   ${D}Claude can still work anywhere you point it; this is just where it starts.${N}"
+  say "   Press ${B}Enter${N} to use ${B}${def}${N} ${D}(${hint})${N}, or type another folder."
   while :; do
     a="$(ask "   Folder:" "$(pretty "$def")")"
     a="$(expand_path "$a")"
-    if [ -d "$a" ]; then FOLDER="$a"; break; fi
+    if [ -d "$a" ]; then FOLDER="$a"; ok "Sessions will start in ${FOLDER}"; break; fi
     err "That folder doesn't exist: $a"
     [ "$HAVE_TTY" = 1 ] || die "Pass an existing folder with --folder."
   done
@@ -257,13 +313,13 @@ choose_permission() {
   case "$cur" in acceptEdits) def=2 ;; auto) def=3 ;; bypassPermissions) def=4 ;; esac
   say ""
   say "${B}2. How much can Claude do without asking you?${N}"
-  say "   1) Ask before every change            ${D}safest, you approve each step in the app${N}"
-  say "   2) Edit files freely                  ${D}asks before running commands${N}"
-  say "   3) Auto                               ${D}Claude decides, asks only for risky actions${N}"
-  say "   4) Full access, never asks            ${D}only if you know what this means${N}"
   while :; do
-    a="$(ask "   Choose 1-4:" "$def")"
-    case "$a" in
+    pick "$def" \
+      "Ask before every change"$'\t'"safest, you approve each step in the app" \
+      "Edit files freely"$'\t'"asks before running commands" \
+      "Auto"$'\t'"Claude decides, asks only for risky actions" \
+      "Full access, never asks"$'\t'"only if you know what this means"
+    case "$PICKED" in
       1) PERMISSION=default; break ;;
       2) PERMISSION=acceptEdits; break ;;
       3) PERMISSION=auto; break ;;
@@ -275,33 +331,26 @@ choose_permission() {
         if [ "$HAVE_TTY" = 1 ]; then
           a="$(ask "   Type FULL to confirm, or press Enter to pick again:" "")"
           if [ "$a" = "FULL" ]; then PERMISSION=bypassPermissions; break; fi
+          def=3
         else
           die "Full access can't be chosen without a confirmation. Pass --permission bypassPermissions --yes-full-access."
         fi
         ;;
-      *) err "Please type 1, 2, 3 or 4." ; [ "$HAVE_TTY" = 1 ] || die "Invalid choice." ;;
     esac
   done
 }
 
 choose_awake() {
-  local def=1 a
+  local def=1
   case "$(normalize_awake "${AWAKE:-no}" || echo no)" in charger) def=2 ;; always) def=3 ;; esac
   say ""
   say "${B}3. Keep this Mac awake so the app can reach it?${N}"
   say "   ${D}A sleeping Mac can't be reached. Closing a laptop lid still puts it to sleep.${N}"
-  say "   1) No                                 ${D}normal sleep${N}"
-  say "   2) On the charger                     ${D}stays awake while plugged in${N}"
-  say "   3) Always, charger and battery        ${D}also on battery, which drains it faster${N}"
-  while :; do
-    a="$(ask "   Choose 1-3:" "$def")"
-    case "$a" in
-      1) AWAKE=no; break ;;
-      2) AWAKE=charger; break ;;
-      3) AWAKE=always; break ;;
-      *) err "Please type 1, 2 or 3." ; [ "$HAVE_TTY" = 1 ] || die "Invalid choice." ;;
-    esac
-  done
+  pick "$def" \
+    "No"$'\t'"normal sleep" \
+    "On the charger"$'\t'"stays awake while plugged in" \
+    "Always, charger and battery"$'\t'"also on battery, which drains it faster"
+  case "$PICKED" in 2) AWAKE=charger ;; 3) AWAKE=always ;; *) AWAKE=no ;; esac
 }
 
 # ---------- service ----------
@@ -708,14 +757,8 @@ menu() {
   step "Claude Remote Control is already set up on this Mac"
   if [ -n "$(svc_pid)" ]; then ok "Running"; else warn "Installed but not running"; fi
   say ""
-  say "   1) Check it's working"
-  say "   2) Restart it"
-  say "   3) Change settings (folder, permissions, stay awake)"
-  say "   4) Remove it"
-  say "   5) Nothing, exit"
-  local a
-  a="$(ask "   Choose 1-5:" "1")"
-  case "$a" in
+  pick 1 "Check it's working" "Restart it" "Change settings"$'\t'"folder, permissions, stay awake" "Remove it" "Nothing, exit"
+  case "$PICKED" in
     1) cmd_status ;;
     2) cmd_restart ;;
     3) cmd_install ;;

@@ -13,7 +13,7 @@ It adds a small background service that keeps your Mac connected to your Claude 
    curl -fsSL https://raw.githubusercontent.com/A3zooz/claude-remote-control/main/install.sh | bash
    ```
 
-3. Answer three quick questions. Pressing Enter picks the default, which is fine for most people.
+3. Answer three quick questions. Use the **↑/↓ arrow keys** and press **Enter**. Pressing Enter right away keeps the default, which is fine for most people. For the folder, it shows you which folder Enter will use.
 4. When you see **✅ All set**, open the Claude app, go to **Code**, and pick your Mac.
 
 If Claude Code isn't installed or you're not signed in, the script offers to do that for you first.
