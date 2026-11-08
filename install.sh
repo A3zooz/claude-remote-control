@@ -20,15 +20,20 @@
 set -u
 
 LABEL="io.github.a3zooz.claude-remote-control"
+SUFFIX=""
+# Testing only: run a separate copy (own service, config and logs) next to a real install.
+if [ -n "${CRC_TEST_NAME:-}" ]; then SUFFIX="-${CRC_TEST_NAME}"; LABEL="${LABEL}${SUFFIX}"; fi
 UID_NUM="$(id -u)"
 DOMAIN="gui/${UID_NUM}"
 PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
-LOG_DIR="${HOME}/Library/Logs/claude-remote-control"
-CONF_DIR="${HOME}/.config/claude-remote-control"
+LOG_DIR="${HOME}/Library/Logs/claude-remote-control${SUFFIX}"
+CONF_DIR="${HOME}/.config/claude-remote-control${SUFFIX}"
 CONF="${CONF_DIR}/config"
 WD_LABEL="${LABEL}.watchdog"
 WD_PLIST="${HOME}/Library/LaunchAgents/${WD_LABEL}.plist"
 WD_SCRIPT="${CONF_DIR}/watchdog.sh"
+APPLY_LABEL="${LABEL}.apply"
+APPLY_LOG="${HOME}/Library/Logs/claude-remote-control${SUFFIX}-apply.log"
 REPO_URL="https://github.com/A3zooz/claude-remote-control"
 ONE_LINER="curl -fsSL https://raw.githubusercontent.com/A3zooz/claude-remote-control/main/install.sh | bash"
 
@@ -487,8 +492,7 @@ show_failure() {
 }
 
 # ---------- commands ----------
-cmd_install() {
-  # Reject bad options before touching anything.
+validate_args() { # reject bad options before touching anything
   if [ -n "$ARG_FOLDER" ] && [ ! -d "$(expand_path "$ARG_FOLDER")" ]; then
     die "Folder doesn't exist: $(expand_path "$ARG_FOLDER")"
   fi
@@ -498,6 +502,10 @@ cmd_install() {
       die "Full access needs --yes-full-access as well."
     fi
   fi
+}
+
+cmd_install() {
+  validate_args
 
   step "Checking your Mac"
   check_mac
@@ -511,7 +519,8 @@ cmd_install() {
   [ -n "$ARG_AWAKE" ] && AWAKE="$ARG_AWAKE"
 
   [ -n "$ARG_FOLDER" ] || choose_folder
-  [ -n "$ARG_PERMISSION" ] || choose_permission
+  # With no keyboard, keep the saved level (already confirmed once) instead of asking.
+  if [ -z "$ARG_PERMISSION" ] && { [ "$HAVE_TTY" = 1 ] || [ -z "$PERMISSION" ]; }; then choose_permission; fi
   if [ -n "$ARG_AWAKE" ]; then
     case "$AWAKE" in y|yes|true|1) AWAKE=yes ;; *) AWAKE=no ;; esac
   else
@@ -577,6 +586,11 @@ cmd_status() {
     say "  ${D}Recent watchdog actions:${N}"
     tail -3 "${LOG_DIR}/watchdog.log" | sed 's/^/    /'
   fi
+  if [ -s "$APPLY_LOG" ]; then
+    say ""
+    say "  ${D}Last background change ($(pretty "$APPLY_LOG")):${N}"
+    grep -E '^=== |exit=|✓|✗|previous settings' "$APPLY_LOG" | tail -6 | sed 's/^/    /'
+  fi
   if [ -s "${LOG_DIR}/err.log" ]; then
     say ""
     say "  ${D}Recent errors:${N}"
@@ -598,10 +612,62 @@ cmd_uninstall() {
   step "Removing Claude Remote Control"
   stop_service
   rm -f "$PLIST" "$WD_PLIST"; ok "Background service removed"
-  rm -rf "$CONF_DIR" "$LOG_DIR"; ok "Settings and logs removed"
+  rm -rf "$CONF_DIR" "$LOG_DIR"
+  [ "${DETACHED:-0}" = 1 ] || rm -f "$APPLY_LOG"  # a detached uninstall is still writing to it
+  ok "Settings and logs removed"
   say ""
   say "  Claude Code itself is still installed. This Mac will drop out of the Claude app"
   say "  within a few minutes."
+}
+
+# --detach: hand install/restart/uninstall to launchd as a one-off job and return.
+# Those commands stop the service, which ends every session it hosts, including
+# a Claude session that is itself running the command from the Claude app. A
+# launchd job isn't part of that session, so it survives and finishes the change.
+detach() {
+  case "$CMD" in install|restart|uninstall) ;; *) die "--detach works with install, restart or uninstall." ;; esac
+  [ "$CMD" = install ] && validate_args
+  [ "$CMD" = restart ] && { [ -f "$PLIST" ] || die "Not installed yet."; }
+  local self="${BASH_SOURCE[0]:-}" copy
+  [ -f "$self" ] || die "--detach needs the script saved to a file first (curl -fsSL ... -o install.sh, then bash install.sh ...)."
+  copy="${TMPDIR:-/tmp}"; copy="${copy%/}/claude-remote-control${SUFFIX}-apply.sh"
+  cp "$self" "$copy" || die "Couldn't copy the script to $copy."
+  : >"$APPLY_LOG"
+  launchctl remove "$APPLY_LABEL" >/dev/null 2>&1 || true
+  launchctl submit -l "$APPLY_LABEL" -- /usr/bin/env PATH="$PATH" ${CRC_TEST_NAME:+CRC_TEST_NAME="$CRC_TEST_NAME"} /bin/bash "$copy" __detached "$@" \
+    || die "launchd refused the job."
+  ok "Handed to launchd. The $CMD starts in about 10 seconds."
+  say "  Sessions running through Remote Control end when it does, this one too if it"
+  say "  came from the Claude app. Afterwards, start a new session and check the result:"
+  say "    bash \"$copy\" status       ${D}(log: $(pretty "$APPLY_LOG"))${N}"
+}
+
+run_detached() {
+  exec >>"$APPLY_LOG" 2>&1 </dev/null
+  say "=== $(date '+%Y-%m-%d %H:%M:%S') $CMD"
+  sleep 10
+  load_config
+  local had_conf=0 old_f="$FOLDER" old_p="$PERMISSION" old_a="$AWAKE" rc
+  [ -f "$CONF" ] && had_conf=1
+  ( dispatch ); rc=$?
+  say "exit=$rc"
+  if [ "$rc" -ne 0 ] && [ "$CMD" = install ] && [ "$had_conf" = 1 ]; then
+    say "Putting the previous settings back"
+    ( ARG_FOLDER="$old_f"; ARG_PERMISSION="$old_p"; ARG_AWAKE="$old_a"; ARG_YES_FULL=1; cmd_install )
+    say "exit=$? (previous settings)"
+  fi
+  say "=== $(date '+%Y-%m-%d %H:%M:%S') done"
+  launchctl remove "$APPLY_LABEL"  # last: this stops the job, and launchd would rerun it otherwise
+}
+
+dispatch() {
+  case "$CMD" in
+    install) cmd_install ;;
+    status) cmd_status ;;
+    restart) cmd_restart ;;
+    uninstall) cmd_uninstall ;;
+    menu) menu ;;
+  esac
 }
 
 menu() {
@@ -634,16 +700,23 @@ usage() {
   say ""
   say "Options for install: --folder PATH  --permission default|acceptEdits|auto|bypassPermissions"
   say "                     --awake yes|no  --yes-full-access"
+  say "Any change: --detach  run it as a one-off launchd job (survives this session ending)"
 }
 
 main() {
-  CMD="" ARG_FOLDER="" ARG_PERMISSION="" ARG_AWAKE="" ARG_YES_FULL=0
+  CMD="" ARG_FOLDER="" ARG_PERMISSION="" ARG_AWAKE="" ARG_YES_FULL=0 ARG_DETACH=0 DETACHED=0
+  local pass=()
   while [ $# -gt 0 ]; do
     case "$1" in
+      --detach) ARG_DETACH=1; shift; continue ;;
+      __detached) DETACHED=1; shift; continue ;;
+    esac
+    pass+=("$1")
+    case "$1" in
       install|status|restart|uninstall|menu) CMD="$1" ;;
-      --folder) ARG_FOLDER="${2:-}"; shift ;;
-      --permission) ARG_PERMISSION="${2:-}"; shift ;;
-      --awake) ARG_AWAKE="${2:-}"; shift ;;
+      --folder) ARG_FOLDER="${2:-}"; pass+=("${2:-}"); shift ;;
+      --permission) ARG_PERMISSION="${2:-}"; pass+=("${2:-}"); shift ;;
+      --awake) ARG_AWAKE="${2:-}"; pass+=("${2:-}"); shift ;;
       --yes-full-access) ARG_YES_FULL=1 ;;
       -h|--help|help) usage; exit 0 ;;
       *) die "Unknown option: $1 (try --help)" ;;
@@ -654,17 +727,13 @@ main() {
   if [ -z "$CMD" ]; then
     if [ -f "$PLIST" ] && [ "$HAVE_TTY" = 1 ]; then CMD=menu; else CMD=install; fi
   fi
+  if [ "$DETACHED" = 1 ]; then run_detached; exit 0; fi
+  if [ "$ARG_DETACH" = 1 ]; then detach ${pass[@]+"${pass[@]}"}; exit 0; fi
   if [ "$CMD" = install ] && [ "$HAVE_TTY" = 0 ] && { [ -z "$ARG_FOLDER" ] || [ -z "$ARG_PERMISSION" ]; }; then
-    say "  ${D}No keyboard available; using defaults for anything not given as an option.${N}"
+    say "  ${D}No keyboard available; using saved settings, or defaults, for anything not given as an option.${N}"
   fi
 
-  case "$CMD" in
-    install) cmd_install ;;
-    status) cmd_status ;;
-    restart) cmd_restart ;;
-    uninstall) cmd_uninstall ;;
-    menu) menu ;;
-  esac
+  dispatch
 }
 
 main "$@"

@@ -18,6 +18,18 @@ It adds a small background service that keeps your Mac connected to your Claude 
 
 If Claude Code isn't installed or you're not signed in, the script offers to do that for you first.
 
+### Or let Claude do it
+
+Install the plugin in Claude Code, then just ask ("set up remote control", "switch remote control to auto", "my Mac doesn't show up in the app"):
+
+```
+/plugin install remote-control --marketplace A3zooz/claude-remote-control
+```
+
+On older Claude Code versions: `/plugin marketplace add A3zooz/claude-remote-control`, then `/plugin install remote-control@claude-remote-control`.
+
+Claude asks you the three questions in chat. If you're talking to it from the Claude app, it warns you before any change that would end that conversation, and makes the change in the background so it still finishes.
+
 ## The three questions
 
 **1. Which folder should sessions start in?**
@@ -73,6 +85,7 @@ Everything stays inside your user account. No admin password needed.
 | `~/.config/claude-remote-control/config` | Your three answers |
 | `~/.config/claude-remote-control/watchdog.sh` | What that check does |
 | `~/Library/Logs/claude-remote-control/` | Logs, for troubleshooting |
+| `~/Library/Logs/claude-remote-control-apply.log` | Result of the last `--detach` change |
 
 ## The watchdog
 
@@ -95,5 +108,7 @@ curl -fsSL https://raw.githubusercontent.com/A3zooz/claude-remote-control/main/i
 - `--permission` takes `default`, `acceptEdits`, `auto` or `bypassPermissions`. `bypassPermissions` also requires `--yes-full-access`.
 - The service uses the absolute path to `claude` and the `PATH` from the Terminal you installed from. If you move Claude Code or add tools to your PATH later, run the line again and pick *Change settings*.
 - "Keep awake" wraps the command in `caffeinate -s`.
+- `--detach` (with `install`, `restart` or `uninstall`) runs the change as a one-off launchd job, 10 seconds later, and returns right away. Use it when the command runs inside a Remote Control session: stopping the service ends that session, but not the launchd job. If a detached `install` fails, it puts the previous settings back. `status` shows the result. It needs the script saved to a file (`curl -fsSL … -o install.sh && bash install.sh install … --detach`).
+- With no keyboard (run by a script or by Claude), anything not passed as an option keeps its saved value, or the default on a first install.
 - The service runs with `ProcessType=Interactive`, the launchd workaround suggested in #80827. The watchdog's `SIGCONT` covers the cases where that isn't enough.
 - Not applied: `SHELL=/bin/sh` from [#78903](https://github.com/anthropics/claude-code/issues/78903). It would change the shell Claude's Bash tool uses. Only consider it if sessions hang before the first reply and you have a heavy `~/.zshrc`.
