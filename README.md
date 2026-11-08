@@ -76,10 +76,10 @@ Everything stays inside your user account. No admin password needed.
 
 ## The watchdog
 
-A small check runs once a minute and fixes two known problems with running Remote Control in the background:
+A small check runs once a minute. It keeps the logs small (once a log passes 5 MB it's cut down to its last 512 KB, because the service redraws its status screen into `out.log` all day) and works around two problems people have reported with running Remote Control in the background. Both issues are closed upstream, so on a current Claude Code the watchdog usually has nothing to do:
 
 - **Sessions stuck on "Running…" while you're away.** macOS can freeze the session while nobody is using the Mac, and it stays stuck until someone touches the mouse ([anthropics/claude-code#80827](https://github.com/anthropics/claude-code/issues/80827)). The watchdog wakes frozen sessions back up.
-- **New sessions failing after Claude Code updates itself.** The background service keeps using the old version, and once that version is cleaned up every new session fails, while the service still looks fine ([anthropics/claude-code#84817](https://github.com/anthropics/claude-code/issues/84817)). The watchdog restarts the service on the new version when no session is running, or right away if the old version is already gone.
+- **New sessions failing after Claude Code updates itself.** The background service keeps using the old version, and once that version is cleaned up every new session fails, while the service still looks fine ([anthropics/claude-code#84817](https://github.com/anthropics/claude-code/issues/84817)). The watchdog restarts the service on the new version when no session is running, or right away if the old version is already gone. This only applies to the standard installer; an npm install updates in place and is left alone.
 
 Anything it does is logged in `~/Library/Logs/claude-remote-control/watchdog.log`, and **Check it's working** shows the latest entries.
 

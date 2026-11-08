@@ -314,16 +314,34 @@ EOF
 #     watchdog restarts the server onto the new version when no session is
 #     running (or right away if the old file is already gone).
 #     https://github.com/anthropics/claude-code/issues/84817
+#  3. The server redraws its status screen into out.log, which grows by tens
+#     of MB a day. launchd opens the log in append mode, so trimming it in
+#     place is safe; the claude.ai link is reprinted on every redraw, so the
+#     tail still has it.
 write_watchdog() {
   mkdir -p "$CONF_DIR"
   cat >"$WD_SCRIPT" <<'WATCHDOG'
 #!/bin/bash
 # Claude Remote Control watchdog (https://github.com/A3zooz/claude-remote-control).
-# Started every minute by launchd. Env: RC_LABEL, RC_CLAUDE, RC_LOG, RC_DRY_RUN.
+# Started every minute by launchd. Env: RC_LABEL, RC_CLAUDE, RC_LOG, RC_LOG_DIR, RC_DRY_RUN.
 set -u
 DOMAIN="gui/$(id -u)"
 log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$RC_LOG"; }
 act() { if [ -n "${RC_DRY_RUN:-}" ]; then log "(dry run) would: $*"; else "$@"; fi; }
+
+# 0. Keep logs small: past 5 MB, keep the last 512 KB. Rewrite in place
+#    (cat >) rather than replacing the file, so launchd's open handle stays valid.
+trim() {
+  local f="$1" size
+  [ -f "$f" ] || return 0
+  size="$(stat -f %z "$f" 2>/dev/null || echo 0)"
+  [ "$size" -gt 5242880 ] || return 0
+  tail -c 524288 "$f" >"$f.trim" && cat "$f.trim" >"$f"
+  rm -f "$f.trim"
+}
+if [ -z "${RC_DRY_RUN:-}" ]; then
+  for f in "${RC_LOG_DIR:-/nonexistent}/out.log" "${RC_LOG_DIR:-/nonexistent}/err.log" "$RC_LOG"; do trim "$f"; done
+fi
 
 resolve() { # follow symlinks to the real file
   local p="$1" l n=0
@@ -352,9 +370,14 @@ for w in $workers; do
 done
 
 # 2. Move the server onto a new Claude Code version.
+#    Only for the native installer's binary. An npm install is a node script:
+#    the running executable is `node`, which would never match, and npm
+#    updates in place, so the bug this works around doesn't apply.
+current="$(resolve "$RC_CLAUDE")"
+case "$(file -b "$current" 2>/dev/null)" in *Mach-O*) ;; *) exit 0 ;; esac
 running="$(lsof -a -p "$pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
 [ -n "$running" ] || exit 0
-current="$(resolve "$RC_CLAUDE")"
+case "$(basename "$running")" in node|bun) exit 0 ;; esac
 [ "$(resolve "$running")" = "$current" ] && exit 0
 if [ ! -e "$running" ]; then
   log "server's Claude Code version was removed by an update; restarting on $(basename "$current")"
@@ -382,6 +405,7 @@ WATCHDOG
     <key>RC_LABEL</key><string>${LABEL}</string>
     <key>RC_CLAUDE</key><string>$(xml_escape "$CLAUDE")</string>
     <key>RC_LOG</key><string>$(xml_escape "$LOG_DIR")/watchdog.log</string>
+    <key>RC_LOG_DIR</key><string>$(xml_escape "$LOG_DIR")</string>
     <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>StartInterval</key><integer>60</integer>
