@@ -212,6 +212,85 @@ valid_permission() {
   case "$1" in default|acceptEdits|auto|bypassPermissions|plan|dontAsk) return 0 ;; *) return 1 ;; esac
 }
 
+# ---------- folder trust ----------
+# `claude remote-control` exits with "Workspace not trusted" unless the folder,
+# or a folder above it, was trusted in ~/.claude.json (the "Do you trust this
+# folder?" prompt). Under launchd there's no terminal to show that prompt, and
+# Claude Code never saves trust for the home folder at all, so a fresh install
+# needs this done up front. Uses JavaScript for Automation (built into macOS)
+# to read and edit the JSON, since jq and python3 aren't on every Mac.
+CLAUDE_JSON="${HOME}/.claude.json"
+
+# trusted_root DIR -> prints the trusted folder that covers DIR (DIR or a parent), if any
+trusted_root() {
+  [ -f "$CLAUDE_JSON" ] || return 0
+  osascript -l JavaScript - "$CLAUDE_JSON" "$1" 2>/dev/null <<'JS'
+function run(argv) {
+  ObjC.import('Foundation');
+  var s = $.NSString.stringWithContentsOfFileEncodingError(argv[0], $.NSUTF8StringEncoding, null);
+  if (s.isNil()) return '';
+  var p; try { p = JSON.parse(s.js).projects || {}; } catch (e) { return ''; }
+  for (var d = argv[1]; ; d = d.replace(/\/[^\/]*$/, '') || '/') {
+    if (p[d] && p[d].hasTrustDialogAccepted === true) return d;
+    if (d === '/') return '';
+  }
+}
+JS
+}
+
+# save_trust DIR... -> marks each folder trusted, keeping the rest of the file as is
+save_trust() {
+  local tmp mode
+  tmp="$(mktemp "${CLAUDE_JSON}.crc.XXXXXX")" || return 1
+  if ! osascript -l JavaScript - "$CLAUDE_JSON" "$tmp" "$@" >/dev/null 2>&1 <<'JS'
+function run(argv) {
+  ObjC.import('Foundation');
+  var s = $.NSString.stringWithContentsOfFileEncodingError(argv[0], $.NSUTF8StringEncoding, null);
+  var c = s.isNil() ? {} : JSON.parse(s.js);   // a broken file throws: better than overwriting it
+  c.projects = c.projects || {};
+  for (var i = 2; i < argv.length; i++) {
+    c.projects[argv[i]] = c.projects[argv[i]] || {};
+    c.projects[argv[i]].hasTrustDialogAccepted = true;
+  }
+  var out = $.NSString.alloc.initWithUTF8String(JSON.stringify(c, null, 2) + '\n');
+  if (!out.writeToFileAtomicallyEncodingError(argv[1], false, $.NSUTF8StringEncoding, null)) throw new Error('write failed');
+}
+JS
+  then rm -f "$tmp"; return 1; fi
+  mode="$(stat -f '%Lp' "$CLAUDE_JSON" 2>/dev/null || echo 600)"
+  chmod "$mode" "$tmp" && mv -f "$tmp" "$CLAUDE_JSON" || { rm -f "$tmp"; return 1; }
+}
+
+check_folder_trust() {
+  local phys root covered
+  phys="$(cd "$FOLDER" 2>/dev/null && pwd -P)" || phys="$FOLDER"
+  covered="$(trusted_root "$phys")"
+  if [ -n "$covered" ]; then
+    ok "Folder is trusted${covered:+ ($(pretty "$covered"))}"
+    return 0
+  fi
+
+  # Trust inside a git repository counts for the whole repository, like Claude's own prompt.
+  root="$(git -C "$phys" rev-parse --show-toplevel 2>/dev/null || true)"
+  say ""
+  warn "Claude Code hasn't been told to trust $(pretty "$phys") yet, and Remote Control won't start without it."
+  [ -n "$root" ] && [ "$root" != "$phys" ] && \
+    say "   This folder is part of the repository at ${B}$(pretty "$root")${N}; trusting it trusts that whole repository."
+  say "   Sessions started here can read, edit and run files, and this folder's project"
+  say "   settings (hooks, MCP servers, permission rules) apply to them."
+  say "   ${D}Only trust a folder you created or one whose contents you trust.${N}"
+  if [ "$ARG_TRUST" = 1 ]; then
+    :
+  elif [ "$HAVE_TTY" = 1 ]; then
+    yes_no "   Trust it?" y || die "Not trusted, so nothing was changed. Run this again and pick a folder you trust."
+  else
+    die "Folder isn't trusted. Pass --trust-folder to trust $(pretty "$phys"), or pick another folder."
+  fi
+  if [ -n "$root" ] && [ "$root" != "$phys" ]; then save_trust "$phys" "$root"; else save_trust "$phys"; fi \
+    || die "Couldn't save that to ${CLAUDE_JSON}. Run ${B}cd \"$(pretty "$phys")\" && claude${N} once, accept the prompt, then run this again."
+  ok "Trusted $(pretty "${root:-$phys}")"
+}
+
 # ---------- checks ----------
 check_mac() {
   [ "$(uname -s)" = "Darwin" ] || die "This only works on a Mac."
@@ -292,17 +371,31 @@ check_folder_free() {
 }
 
 # ---------- questions ----------
+DEFAULT_FOLDER="${HOME}/Claude"
+
+# Claude Code never saves trust for the home folder, so Remote Control can only
+# start there if a folder above it (like /Users) happens to be trusted already.
+home_unusable() { [ "$1" = "$HOME" ] && [ -z "$(trusted_root "$HOME")" ]; }
+
 choose_folder() {
-  local def="${FOLDER:-$HOME}" a hint="your home folder"
-  [ "$def" != "$HOME" ] && hint="the current setting"
+  local def="${FOLDER:-$DEFAULT_FOLDER}" a hint="the current setting"
+  home_unusable "$def" && def="$DEFAULT_FOLDER"
+  [ "$def" = "$DEFAULT_FOLDER" ] && [ "$def" != "${FOLDER:-}" ] && hint="created if it doesn't exist"
   say ""
   say "${B}1. Which folder should new sessions start in?${N}"
   say "   ${D}Claude can still work anywhere you point it; this is just where it starts.${N}"
-  say "   Press ${B}Enter${N} to use ${B}${def}${N} ${D}(${hint})${N}, or type another folder."
+  say "   ${D}Pick a project folder, or a folder that holds them (like ~/code). Not your home folder.${N}"
+  say "   Press ${B}Enter${N} to use ${B}$(pretty "$def")${N} ${D}(${hint})${N}, or type another folder."
   while :; do
     a="$(ask "   Folder:" "$(pretty "$def")")"
     a="$(expand_path "$a")"
-    if [ -d "$a" ]; then FOLDER="$a"; ok "Sessions will start in ${FOLDER}"; break; fi
+    if [ "$a" = "$DEFAULT_FOLDER" ] && [ ! -e "$a" ]; then mkdir -p "$a" || die "Couldn't create $a"; fi
+    if home_unusable "$a"; then
+      err "Claude Code won't save trust for your home folder, so Remote Control can't start there."
+      [ "$HAVE_TTY" = 1 ] || die "Pass a folder other than your home folder with --folder."
+      continue
+    fi
+    if [ -d "$a" ]; then FOLDER="$a"; ok "Sessions will start in $(pretty "$FOLDER")"; break; fi
     err "That folder doesn't exist: $a"
     [ "$HAVE_TTY" = 1 ] || die "Pass an existing folder with --folder."
   done
@@ -559,6 +652,13 @@ show_failure() {
     say "  ${D}Last lines of ${LOG_DIR}/err.log:${N}"
     tail -8 "${LOG_DIR}/err.log" | sed 's/^/    /'
   fi
+  if grep -q "Workspace not trusted" "${LOG_DIR}/err.log" 2>/dev/null; then
+    say ""
+    say "  Claude Code doesn't trust $(pretty "$FOLDER"). Run this again and pick a project"
+    say "  folder (not your home folder); it will offer to trust it."
+    stop_service  # otherwise launchd retries it every 30 seconds
+    return
+  fi
   if grep -q "already served" "${LOG_DIR}/err.log" 2>/dev/null; then
     say ""
     say "  Another Remote Control server is using $(pretty "$FOLDER"). Stop it, or run this"
@@ -577,6 +677,9 @@ show_failure() {
 validate_args() { # reject bad options before touching anything
   if [ -n "$ARG_FOLDER" ] && [ ! -d "$(expand_path "$ARG_FOLDER")" ]; then
     die "Folder doesn't exist: $(expand_path "$ARG_FOLDER")"
+  fi
+  if [ -n "$ARG_FOLDER" ] && home_unusable "$(expand_path "$ARG_FOLDER")"; then
+    die "Claude Code won't save trust for your home folder, so Remote Control can't start there. Pass another --folder."
   fi
   if [ -n "$ARG_AWAKE" ] && ! normalize_awake "$ARG_AWAKE" >/dev/null; then
     die "Unknown keep-awake setting: $ARG_AWAKE (use no, charger or always)"
@@ -611,6 +714,7 @@ cmd_install() {
   if [ -z "$ARG_AWAKE" ] && { [ "$HAVE_TTY" = 1 ] || [ ! -f "$CONF" ]; }; then choose_awake; fi
 
   check_folder_free
+  check_folder_trust
 
   step "Setting it up"
   stop_service
@@ -777,11 +881,12 @@ usage() {
   say ""
   say "Options for install: --folder PATH  --permission default|acceptEdits|auto|bypassPermissions"
   say "                     --awake no|charger|always  --yes-full-access"
+  say "                     --trust-folder  trust the folder in Claude Code if it isn't yet"
   say "Any change: --detach  run it as a one-off launchd job (survives this session ending)"
 }
 
 main() {
-  CMD="" ARG_FOLDER="" ARG_PERMISSION="" ARG_AWAKE="" ARG_YES_FULL=0 ARG_DETACH=0 DETACHED=0
+  CMD="" ARG_FOLDER="" ARG_PERMISSION="" ARG_AWAKE="" ARG_YES_FULL=0 ARG_TRUST=0 ARG_DETACH=0 DETACHED=0
   local pass=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -795,6 +900,7 @@ main() {
       --permission) ARG_PERMISSION="${2:-}"; pass+=("${2:-}"); shift ;;
       --awake) ARG_AWAKE="${2:-}"; pass+=("${2:-}"); shift ;;
       --yes-full-access) ARG_YES_FULL=1 ;;
+      --trust-folder) ARG_TRUST=1 ;;
       -h|--help|help) usage; exit 0 ;;
       *) die "Unknown option: $1 (try --help)" ;;
     esac

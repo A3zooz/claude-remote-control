@@ -9,7 +9,7 @@
       "source": "./",
       "description": "Set up, check, change or remove Claude Remote Control on a Mac, so Claude Code sessions can be started from the Claude app.",
       "category": "productivity",
-      "version": "1.2.0"
+      "version": "1.3.0"
     }
   ]
 }

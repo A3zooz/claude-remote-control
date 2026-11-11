@@ -25,7 +25,8 @@ Ask only about what changes. Keep the current values for everything else.
 
 | Flag | Choices |
 |---|---|
-| `--folder` | where sessions start (default `~`) |
+| `--folder` | where sessions start (default `~/Claude`; not `~`, Claude Code never saves trust for the home folder) |
+| `--trust-folder` | trust that folder in Claude Code if it isn't yet. Only after the user says yes to trusting it: sessions there can read, edit and run files, and its hooks and MCP servers apply |
 | `--permission` | `default` (asks every time), `acceptEdits`, `auto`, `bypassPermissions` |
 | `--awake` | `no`, `charger` (awake only while plugged in), `always` (also on battery, which drains it faster). `pmset -g batt` shows which it's on now |
 
@@ -54,5 +55,5 @@ p=$PPID; while [ "${p:-1}" -gt 1 ]; do ps -o args= -p "$p" | grep -qE '^[^ ]*cla
 | Message | Tell the user |
 |---|---|
 | not signed in / needs claude.ai login | run `! claude auth login` |
-| `Workspace not trusted` | run `claude` once in that folder in Terminal, accept the prompt, then retry |
+| `Folder isn't trusted` / `Workspace not trusted` | ask whether they trust that folder; if yes, rerun with `--trust-folder`. For the home folder, pick another folder instead |
 | `already served` / another server in folder | stop the other `claude remote-control`, or pick another folder |

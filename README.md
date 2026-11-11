@@ -16,7 +16,9 @@ It adds a small background service that keeps your Mac connected to your Claude 
 3. Answer three quick questions. Use the **↑/↓ arrow keys** and press **Enter**. Pressing Enter right away keeps the default, which is fine for most people. For the folder, it shows you which folder Enter will use.
 4. When you see **✅ All set**, open the Claude app, go to **Code**, and pick your Mac.
 
-If Claude Code isn't installed or you're not signed in, the script offers to do that for you first.
+If Claude Code isn't installed or you're not signed in, the script offers to do that for you first. You don't need to have used Claude Code before.
+
+Remote Control only starts in a folder Claude Code trusts (the "Do you trust this folder?" prompt). If yours isn't trusted yet, the script shows the same warning and asks. Claude Code never saves trust for your home folder, so sessions start in `~/Claude` by default (created for you) or in any project folder you pick.
 
 ### Or let Claude do it
 
